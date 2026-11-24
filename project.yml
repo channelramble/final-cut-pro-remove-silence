@@ -1,0 +1,58 @@
+# Xcode project for the app and its Final Cut Pro workflow extension.
+# Generate with: xcodegen generate   (scripts/build.sh does this for you)
+name: SilenceRemover
+options:
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "5.0"
+    ENABLE_HARDENED_RUNTIME: NO
+    # scripts/build.sh signs the finished bundle (framework, then extension, then app).
+    CODE_SIGNING_ALLOWED: NO
+packages:
+  SilenceCut:
+    path: .
+targets:
+  SilenceRemover:
+    type: application
+    platform: macOS
+    sources:
+      - path: App/Shared
+      - path: App/SilenceRemover
+        excludes: ["Info.plist"]
+      - path: App/Resources
+    dependencies:
+      - package: SilenceCut
+        product: SilenceCutCore
+      - target: RemoveSilenceExtension
+    settings:
+      base:
+        PRODUCT_NAME: Silence Remover
+        PRODUCT_BUNDLE_IDENTIFIER: com.silenceremover.SilenceRemover
+        INFOPLIST_FILE: App/SilenceRemover/Info.plist
+  RemoveSilenceExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: App/Shared
+      - path: App/Extension
+        excludes: ["Info.plist", "*.entitlements"]
+      - path: App/Resources
+    dependencies:
+      - package: SilenceCut
+        product: SilenceCutCore
+      # Final Cut Pro's extension runtime. Copied from the Final Cut Pro app bundle
+      # (Contents/Frameworks/ProExtension.framework); it declares the extension point.
+      - framework: vendor/fcp/Frameworks/ProExtension.framework
+        embed: true
+    settings:
+      base:
+        PRODUCT_NAME: Remove Silence
+        PRODUCT_BUNDLE_IDENTIFIER: com.silenceremover.SilenceRemover.RemoveSilence
+        INFOPLIST_FILE: App/Extension/Info.plist
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+        OTHER_LDFLAGS: "-Wl,-needed_framework,ProExtension"
