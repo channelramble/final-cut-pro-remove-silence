@@ -12,9 +12,10 @@ public struct SilenceSettings: Codable, Equatable, Sendable {
     /// 0.03 s is two frames at 60 fps: the cut lands while the word is still fading, which is
     /// how a tight manual edit looks.
     public var padding: Double = 0.03
-    /// A sound shorter than this with dead air on both sides (a tap, a click, a sigh) is removed
-    /// along with the silence instead of being left behind as a tiny clip.
-    public var minimumSound: Double = 0.25
+    /// Shortest clip worth keeping. A stretch of sound shorter than this with dead air on both
+    /// sides (a tap, a click or two, a sigh, a false start) is removed along with the silence
+    /// instead of being left behind as a tiny clip.
+    public var minimumSound: Double = 0.4
     public var scope: DetectionScope = .primaryStoryline
 
     public init() {}
@@ -79,6 +80,10 @@ public enum SilenceDetector {
         return min(max(min(floor + range / 2, peak - 24), floor + 8), peak - 14)
     }
 
+    /// A stretch has "voice" in it when some of it comes within this many dB of the voice level.
+    static let voiceMargin: Float = 12
+    /// Stretches up to this long are dropped when they have no voice in them.
+    static let quietClipLength = 1.0
     /// Clicks shorter than this never interrupt a silence, however short the silence.
     static let clickLength = 0.08
 
@@ -86,14 +91,37 @@ public enum SilenceDetector {
         let hop = TimelineAnalysis.hop
         let count = analysis.hopCount
 
-        // 1. Silence level per media file.
+        // 1. Silence level per media file, and how loud the voice in it is.
         var thresholdByFile: [String: Float] = [:]
+        var voiceLevelByFile: [String: Float] = [:]
+        var levelsByFile: [String: [Float]] = [:]
+        for track in analysis.tracks {
+            levelsByFile[track.fileKey, default: []].append(contentsOf: track.levels)
+        }
+        for (key, levels) in levelsByFile {
+            if let statistics = levelStatistics(levels) { voiceLevelByFile[key] = statistics.peak }
+        }
         if settings.autoThreshold {
-            var levelsByFile: [String: [Float]] = [:]
-            for track in analysis.tracks {
-                levelsByFile[track.fileKey, default: []].append(contentsOf: track.levels)
+            var undecided: [String] = []
+            for (key, levels) in levelsByFile {
+                if voiceLevelByFile[key] == nil {
+                    undecided.append(key)
+                } else {
+                    thresholdByFile[key] = automaticThreshold(levels: levels)
+                }
             }
-            for (key, levels) in levelsByFile { thresholdByFile[key] = automaticThreshold(levels: levels) }
+            // A recording too short to judge on its own (an accidental fraction-of-a-second
+            // clip) is held to the same level as the rest of the project.
+            let known = thresholdByFile.map { (level: $0.value, weight: levelsByFile[$0.key]?.count ?? 0) }
+                .sorted { $0.level < $1.level }
+            var fallback: Float = -90
+            var seen = 0
+            let half = known.reduce(0) { $0 + $1.weight } / 2
+            for entry in known {
+                seen += entry.weight
+                if seen >= half { fallback = entry.level; break }
+            }
+            for key in undecided { thresholdByFile[key] = fallback }
         }
         var nameByFile: [String: String] = [:]
         var weightByFile: [String: Int] = [:]
@@ -104,6 +132,8 @@ public enum SilenceDetector {
         //    that stays below it — the last of a word's fade, a breath before the next one,
         //    rustling — is silence, so cuts land right against the audible part of the speech.
         var sound = [Bool](repeating: false, count: count)
+        // Hops where the audio comes within `voiceMargin` of the recording's voice level.
+        var nearVoice = [Bool](repeating: false, count: count)
         for track in analysis.tracks {
             nameByFile[track.fileKey] = track.mediaName
             weightByFile[track.fileKey, default: 0] += track.levels.count
@@ -117,9 +147,12 @@ public enum SilenceDetector {
             } else {
                 threshold = Float(settings.thresholdDB) - track.gainDB
             }
+            let voice = voiceLevelByFile[track.fileKey].map { $0 - voiceMargin } ?? threshold + 20
             for (i, level) in track.levels.enumerated() where level >= threshold {
                 let h = track.firstHop + i
-                if h >= 0 && h < count { sound[h] = true }
+                guard h >= 0 && h < count else { continue }
+                sound[h] = true
+                if level >= voice { nearVoice[h] = true }
             }
         }
         var silent = [Bool](repeating: false, count: count)
@@ -128,35 +161,60 @@ public enum SilenceDetector {
         // 3. Sounds that are not worth keeping.
         //    a) A click or lip smack doesn't interrupt a silence — unless it sits right next to
         //       speech, where it is more likely the "t" or "k" that ends a word.
-        //    b) A short noise with dead air on both sides (a tap on the desk, a sigh between
-        //       takes) would be left behind as a clip a few frames long; it goes with the silence.
         let minSilenceHops = max(1, Int((settings.minimumSilence / hop).rounded()))
-        func absorbIslands(shorterThan limit: Int, betweenSilencesOfAtLeast neighbour: Int) {
-            guard limit > 0 else { return }
-            // Run-length encode: (start, end, isSilent).
-            var runs: [(start: Int, end: Int, silent: Bool)] = []
+        func runs() -> [(start: Int, end: Int, silent: Bool)] {
+            var out: [(start: Int, end: Int, silent: Bool)] = []
             var h = 0
             while h < count {
                 var end = h
                 while end < count && silent[end] == silent[h] { end += 1 }
-                runs.append((h, end, silent[h]))
+                out.append((h, end, silent[h]))
                 h = end
             }
-            guard runs.count >= 3 else { return }
-            for r in 1..<(runs.count - 1) where !runs[r].silent {
-                let island = runs[r], before = runs[r - 1], after = runs[r + 1]
-                guard island.end - island.start < limit,
-                      before.silent, after.silent,
-                      before.end - before.start >= neighbour, after.end - after.start >= neighbour,
-                      (island.start..<island.end).allSatisfy({ analysis.cuttable[$0] }) else { continue }
-                for k in island.start..<island.end { silent[k] = true }
-            }
+            return out
         }
         let clickHops = Int((min(clickLength, settings.minimumSound) / hop).rounded())
-        absorbIslands(shorterThan: clickHops, betweenSilencesOfAtLeast: 15)
-        absorbIslands(shorterThan: Int((settings.minimumSound / hop).rounded()), betweenSilencesOfAtLeast: minSilenceHops)
+        if clickHops > 0 {
+            let all = runs()
+            if all.count >= 3 {
+                for r in 1..<(all.count - 1) where !all[r].silent {
+                    let island = all[r], before = all[r - 1], after = all[r + 1]
+                    guard island.end - island.start < clickHops,
+                          before.end - before.start >= 15, after.end - after.start >= 15,
+                          (island.start..<island.end).allSatisfy({ analysis.cuttable[$0] }) else { continue }
+                    for k in island.start..<island.end { silent[k] = true }
+                }
+            }
+        }
 
-        // 4. Turn long enough silent runs into frame-aligned cuts, keeping some padding.
+        //    b) Whatever lies between two silences that are long enough to cut would become a
+        //       clip of its own. It has to earn that: a stretch that is too short, that is mostly
+        //       gaps (a couple of clicks), or that is brief and never gets near the level of the
+        //       voice (a rustle, a sigh, a mutter between takes) goes with the silence instead.
+        let minimumClipHops = Int((settings.minimumSound / hop).rounded())
+        if minimumClipHops > 0 {
+            let all = runs()
+            let long = all.indices.filter { all[$0].silent && all[$0].end - all[$0].start >= minSilenceHops }
+            for (left, right) in zip(long, long.dropFirst()) {
+                let start = all[left].end, end = all[right].start
+                guard end > start, (start..<end).allSatisfy({ silent[$0] || analysis.cuttable[$0] }) else { continue }
+                var heard = 0, voiced = false
+                for h in start..<end where !silent[h] {
+                    heard += 1
+                    if nearVoice[h] { voiced = true }
+                }
+                let tooShort = end - start < minimumClipHops
+                let mostlyGaps = heard < max(1, minimumClipHops / 2)
+                let briefAndQuiet = !voiced && end - start < Int((quietClipLength / hop).rounded())
+                if tooShort || mostlyGaps || briefAndQuiet {
+                    for h in start..<end { silent[h] = true }
+                }
+            }
+        }
+
+        // 4. Turn long enough silent runs into frame-aligned cuts. Next to speech a little quiet
+        //    is kept (the padding). Next to a fenced-off clip there is no speech to protect: the
+        //    cut runs right up to it, and step 5 trims it to that clip's exact edge.
         let fd = analysis.frameDuration
         let fdSeconds = fd.seconds
         var removals: [TimeRange] = []
@@ -169,6 +227,8 @@ public enum SilenceDetector {
                 let start: RationalTime
                 if h == 0 {
                     start = analysis.timelineStart
+                } else if !analysis.cuttable[h - 1] {
+                    start = fd * RationalTime(Int64((analysis.time(ofHop: h) / fdSeconds + 1e-6).rounded(.down)))
                 } else {
                     let t = analysis.time(ofHop: h) + settings.padding
                     start = fd * RationalTime(Int64((t / fdSeconds - 1e-6).rounded(.up)))
@@ -176,6 +236,8 @@ public enum SilenceDetector {
                 let finish: RationalTime
                 if end == count {
                     finish = analysis.timelineEnd
+                } else if !analysis.cuttable[end] {
+                    finish = fd * RationalTime(Int64((analysis.time(ofHop: end) / fdSeconds - 1e-6).rounded(.up)))
                 } else {
                     let t = analysis.time(ofHop: end) - settings.padding
                     finish = fd * RationalTime(Int64((t / fdSeconds + 1e-6).rounded(.down)))

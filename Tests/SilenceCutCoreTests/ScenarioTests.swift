@@ -8,15 +8,19 @@ final class ScenarioTests: XCTestCase {
         var loud: [String: [ClosedRange<Double>]]
         /// Audible but quiet audio (-48 dB): word beginnings and endings, breaths, rustling.
         var soft: [String: [ClosedRange<Double>]] = [:]
+        /// Clearly audible but well below the voice (-30 dB): a mutter, a sigh, a chair.
+        var medium: [String: [ClosedRange<Double>]] = [:]
 
         func envelope(for request: MediaRequest, hop: Double, progress: @Sendable (Double) -> Void) async throws -> AudioEnvelope {
             let ranges = loud[request.url.lastPathComponent] ?? []
             let softRanges = soft[request.url.lastPathComponent] ?? []
+            let mediumRanges = medium[request.url.lastPathComponent] ?? []
             let first = Int((max(0, request.range.lowerBound) / hop).rounded(.down))
             let last = Int((request.range.upperBound / hop).rounded(.up))
             let levels: [Float] = (first..<max(first + 1, last)).map { i in
                 let t = (Double(i) + 0.5) * hop
                 if ranges.contains(where: { $0.contains(t) }) { return -15 }
+                if mediumRanges.contains(where: { $0.contains(t) }) { return -30 }
                 return softRanges.contains { $0.contains(t) } ? -48 : -70
             }
             return AudioEnvelope(startTime: Double(first) * hop, hop: hop, levels: levels)
@@ -140,10 +144,11 @@ final class ScenarioTests: XCTestCase {
 
     // MARK: - Protecting speech and natural pauses
 
-    private func removals(loud: [ClosedRange<Double>], soft: [ClosedRange<Double>] = [], settings: SilenceSettings? = nil) async throws -> [TimeRange] {
+    private func removals(loud: [ClosedRange<Double>], soft: [ClosedRange<Double>] = [], medium: [ClosedRange<Double>] = [],
+                          settings: SilenceSettings? = nil) async throws -> [TimeRange] {
         let data = document(spine: #"<asset-clip ref="r2" offset="0s" name="talk" duration="30s" audioRole="dialogue"/>"#, duration: "30s")
         let file = try FCPXMLFile(data: data)
-        let provider = ScriptedProvider(loud: ["talk.mov": loud], soft: ["talk.mov": soft])
+        let provider = ScriptedProvider(loud: ["talk.mov": loud], soft: ["talk.mov": soft], medium: ["talk.mov": medium])
         let analysis = try await file.analyze(project: project(file), scope: .primaryStoryline, provider: provider)
         return SilenceDetector.detect(analysis, settings: settings ?? self.settings).removals
     }
@@ -153,7 +158,7 @@ final class ScenarioTests: XCTestCase {
         XCTAssertTrue(presets.autoThreshold)
         XCTAssertEqual(presets.minimumSilence, 0.85, "natural pauses are shorter than this; dead air is longer")
         XCTAssertEqual(presets.padding, 0.03, "tight clip-to-clip pacing")
-        XCTAssertEqual(presets.minimumSound, 0.25)
+        XCTAssertEqual(presets.minimumSound, 0.4, "nothing shorter than this is left behind as a clip")
         XCTAssertEqual(presets.scope, .primaryStoryline)
     }
 
@@ -198,8 +203,70 @@ final class ScenarioTests: XCTestCase {
         XCTAssertEqual(tap.count, 1)
         XCTAssertEqual(tap[0].duration.seconds, 9.8, accuracy: 0.04)
         // …but a word is.
-        let word = try await removals(loud: [0...10, 14...14.4, 20...30])
+        let word = try await removals(loud: [0...10, 14...14.6, 20...30])
         XCTAssertEqual(word.count, 2)
+    }
+
+    // MARK: - No tiny clips
+
+    func testNoSliverIsLeftWhereTwoClipsMeet() async throws {
+        // Clip A ends in silence and clip B starts in silence. The edit point between them is
+        // on a frame but not on the analysis grid, which used to leave a few frames of each
+        // clip standing there.
+        let spine = """
+        <asset-clip ref="r2" offset="0s" name="A" duration="601/30s" audioRole="dialogue"/>
+        <asset-clip ref="r3" offset="601/30s" name="B" start="50s" duration="599/30s" audioRole="dialogue"/>
+        """
+        let file = try FCPXMLFile(data: document(spine: spine, duration: "40s"))
+        let provider = ScriptedProvider(loud: ["talk.mov": [0...10], "voiceover.wav": [55...70]])
+        for presets in [settings, SilenceSettings.default] {
+            let outcome = try await cutAndVerify(file, project: project(file), settings: presets, provider: provider, label: "edit point")!
+            XCTAssertEqual(outcome.result.cutCount, 1, "one silence, running across the edit point")
+            let clips = outcome.output.projects[0].spine.elementChildren
+            XCTAssertEqual(clips.map { $0.attr("name") }, ["A", "B"])
+            XCTAssertEqual(seconds(clips[0], "duration"), 10, accuracy: 0.15)
+            XCTAssertEqual(seconds(clips[1], "start"), 55, accuracy: 0.15)
+        }
+    }
+
+    func testAccidentalFractionOfASecondClipIsRemoved() async throws {
+        // A 0.1 s recording (the record button tapped twice) sitting between two takes: too short
+        // to judge on its own, so it is held to the level of the rest and goes with the silence.
+        let spine = """
+        <asset-clip ref="r2" offset="0s" name="take 1" duration="12s" audioRole="dialogue"/>
+        <asset-clip ref="r3" offset="12s" name="oops" duration="3/30s" audioRole="dialogue"/>
+        <asset-clip ref="r2" offset="363/30s" name="take 2" start="40s" duration="537/30s" audioRole="dialogue"/>
+        """
+        let file = try FCPXMLFile(data: document(spine: spine, duration: "30s"))
+        let provider = ScriptedProvider(loud: ["talk.mov": [0...10, 42...60]])
+        let outcome = try await cutAndVerify(file, project: project(file), settings: .default, provider: provider, label: "tiny clip")!
+        XCTAssertEqual(outcome.output.projects[0].spine.elementChildren.map { $0.attr("name") }, ["take 1", "take 2"])
+    }
+
+    func testClustersOfClicksAreNotWorthAClip() async throws {
+        // Click, click… click: three blips spread over a third of a second.
+        let cuts = try await removals(loud: [0...10, 14...14.03, 14.09...14.12, 14.3...14.33, 20...30])
+        XCTAssertEqual(cuts.count, 1)
+    }
+
+    func testBriefQuietNoiseBetweenTakesIsDropped() async throws {
+        // A 0.7 s mutter far below the level of the voice goes with the silence…
+        let mutter = try await removals(loud: [0...10, 20...30], medium: [14...14.7])
+        XCTAssertEqual(mutter.count, 1)
+        // …something that long at speaking level stays…
+        let word = try await removals(loud: [0...10, 14...14.7, 20...30])
+        XCTAssertEqual(word.count, 2)
+        // …and so does a longer quiet passage: it might be someone speaking softly.
+        let quietSpeech = try await removals(loud: [0...10, 20...30], medium: [14...16])
+        XCTAssertEqual(quietSpeech.count, 2)
+    }
+
+    func testNoClipShorterThanTheMinimumIsLeftBetweenCuts() async throws {
+        // A mix of debris between takes; every surviving stretch between two cuts is a real one.
+        let cuts = try await removals(loud: [0...10, 12...12.2, 14...14.05, 16...16.3, 18...18.9, 22...30], settings: .default)
+        let kept = zip(cuts, cuts.dropFirst()).map { $1.start.seconds - $0.end.seconds }
+        XCTAssertEqual(kept.count, 1, "only the 0.9 s stretch survives")
+        XCTAssertTrue(kept.allSatisfy { $0 >= SilenceSettings.default.minimumSound })
     }
 
     func testShortWordBetweenNaturalPausesIsKept() async throws {

@@ -38,6 +38,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
             }
             try? await Task.sleep(nanoseconds: 700_000_000)
+            if arguments.contains("--scroll-to-end") {
+                // Show the lower part of a scrolling panel.
+                func scrollViews(in view: NSView) -> [NSScrollView] {
+                    (view as? NSScrollView).map { [$0] } ?? view.subviews.flatMap(scrollViews)
+                }
+                for scroll in scrollViews(in: window.contentView!) {
+                    guard let document = scroll.documentView else { continue }
+                    let y = document.isFlipped ? max(0, document.bounds.height - scroll.contentView.bounds.height) : 0
+                    scroll.contentView.scroll(to: NSPoint(x: 0, y: y))
+                    scroll.reflectScrolledClipView(scroll.contentView)
+                }
+                try? await Task.sleep(nanoseconds: 400_000_000)
+            }
             guard let view = window.contentView else { exit(2) }
             view.wantsLayer = true
             view.layoutSubtreeIfNeeded()

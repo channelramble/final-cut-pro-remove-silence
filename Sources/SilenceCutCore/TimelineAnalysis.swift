@@ -140,17 +140,26 @@ extension FCPXMLFile {
             if let connected = p.span.connected { participating.insert(connected) }
         }
 
-        // Cuts are only allowed inside splittable primary clips where we actually heard something.
-        var cuttable = [Bool](repeating: false, count: hopCount)
+        // Cuts are allowed wherever we heard something, except inside clips that can't be split
+        // or whose audio we couldn't read. Those are fenced off: exactly, to the frame, through
+        // `protected`, and per hop through `cuttable`. A hop that straddles the edit point
+        // between two ordinary clips stays cuttable, so a silence that runs from the end of one
+        // clip into the start of the next is one silence — not two, with a sliver of each clip
+        // left standing at the edit point.
+        var cuttable = covered
         var protected: [TimeRange] = []
         for item in items {
-            if item.isTransition || !item.splittable {
+            if item.isTransition {
                 protected.append(item.range)
                 continue
             }
             let h0 = max(0, Int(((item.range.start.seconds - t0) / hop).rounded(.up)))
             let h1 = min(hopCount, Int(((item.range.end.seconds - t0) / hop).rounded(.down)))
-            if h1 > h0 { for h in h0..<h1 where covered[h] { cuttable[h] = true } }
+            let heard = h1 > h0 && (h0..<h1).contains { covered[$0] }
+            if !item.splittable || !heard {
+                protected.append(item.range)
+                if h1 > h0 { for h in h0..<h1 { cuttable[h] = false } }
+            }
         }
         if scope == .allClips {
             protected.append(contentsOf: connectedTransitionRanges(items: items, participating: participating))

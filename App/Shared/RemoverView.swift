@@ -4,7 +4,7 @@ import SilenceCutCore
 struct RemoverView: View {
     @ObservedObject var model: RemoverModel
     @ObservedObject var dropState: DropState
-    @State private var showSettings = false
+    @AppStorage("showAdjust") private var showSettings = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -18,8 +18,12 @@ struct RemoverView: View {
             case .ready:
                 header
                 preview
-                settings
-                Spacer(minLength: 0)
+                // The opened-up settings are taller than a small window, so they scroll; the
+                // waveform above stays put so every change can be seen as it is made.
+                ScrollView {
+                    settings
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 footer
             }
         }
@@ -140,92 +144,119 @@ struct RemoverView: View {
             Divider()
 
             // The presets are meant to be left alone; the controls stay out of the way.
-            Text("Cuts every silence longer than \(String(format: "%.2f", model.settings.minimumSilence)) s and joins the speech on either side tightly. Shorter pauses — the natural ones mid-thought — are left as they are.")
+            Text("Cuts every silence longer than \(seconds(model.settings.minimumSilence)) and joins the speech on either side tightly. Shorter pauses are left as they are, and leftover bits of sound shorter than \(seconds(model.settings.minimumSound)) are thrown away.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            DisclosureGroup("Adjust", isExpanded: $showSettings) {
+            DisclosureGroup("Change how it cuts", isExpanded: $showSettings) {
                 controls
-                    .padding(.top, 8)
+                    .padding(.top, 10)
             }
         }
     }
 
     private var controls: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Toggle("Detect the silence level automatically", isOn: $model.settings.autoThreshold)
-                Text(model.settings.autoThreshold
-                     ? "Measures each recording's background noise and voice level, and draws the line between them."
-                     : "Anything quieter than the level below counts as silence.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+        VStack(alignment: .leading, spacing: 18) {
+            // How long a silence has to be.
+            slider("Only cut silences longer than",
+                   value: $model.settings.minimumSilence, range: SilenceSettings.minimumSilenceRange, step: 0.05,
+                   label: seconds(model.settings.minimumSilence),
+                   lower: "cuts short pauses too", upper: "keeps longer pauses",
+                   explanation: "A pause shorter than this is never touched. A normal breath between sentences is about half a second; the dead air after losing your train of thought is longer.")
+
+            // How tight each cut is.
+            slider("Silence left on each side of a cut",
+                   value: $model.settings.padding, range: SilenceSettings.paddingRange, step: 0.01,
+                   label: seconds(model.settings.padding),
+                   lower: "tighter", upper: "more breathing room",
+                   explanation: "Where a silence is cut out, this much quiet stays after the last word and before the next one. Raise it if the ends of words sound clipped.")
+
+            // Tiny clips.
+            slider("Throw away leftover clips shorter than",
+                   value: $model.settings.minimumSound, range: SilenceSettings.minimumSoundRange, step: 0.05,
+                   label: seconds(model.settings.minimumSound),
+                   lower: "keeps tiny clips", upper: "removes longer leftovers",
+                   explanation: "A bit of sound this short with silence on both sides — a click, a cough, a false start — is deleted along with the silence instead of becoming a tiny clip. Set high, a lone short word like “Okay” goes too.")
+
+            // What counts as silence.
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("Work out what counts as silence for me", isOn: $model.settings.autoThreshold)
+                caption(model.settings.autoThreshold
+                        ? "Recommended. The app listens to each recording and treats everything clearly quieter than your voice as silence."
+                        : "Off: you choose the loudness below which audio counts as silence, with the slider underneath.")
+                slider("Anything quieter than this is silence",
+                       value: model.settings.autoThreshold ? .constant(model.result?.displayThresholdDB ?? model.settings.thresholdDB)
+                                                           : $model.settings.thresholdDB,
+                       range: SilenceSettings.thresholdRange, step: 1,
+                       label: String(format: "%.0f dB", model.settings.autoThreshold ? (model.result?.displayThresholdDB ?? model.settings.thresholdDB)
+                                                                                   : model.settings.thresholdDB),
+                       lower: "only near-total quiet", upper: "quiet talking too",
+                       explanation: model.settings.autoThreshold
+                           ? "Chosen for this project automatically — it is the dashed line on the waveform. Turn the switch off to set it yourself."
+                           : "It is the dashed line on the waveform. dB is loudness: 0 is the loudest possible and bigger negative numbers are quieter. Further left is safer; further right removes more.")
+                    .disabled(model.settings.autoThreshold)
             }
 
-            slider("Silence level",
-                   value: model.settings.autoThreshold ? .constant(model.result?.displayThresholdDB ?? model.settings.thresholdDB)
-                                                       : $model.settings.thresholdDB,
-                   range: SilenceSettings.thresholdRange, step: 1,
-                   label: String(format: "%.0f dB", model.settings.autoThreshold ? (model.result?.displayThresholdDB ?? model.settings.thresholdDB)
-                                                                               : model.settings.thresholdDB),
-                   help: "Lower (further left) is more cautious: only quieter audio is treated as silence.")
-                .disabled(model.settings.autoThreshold)
-
-            slider("Shortest silence to cut", value: $model.settings.minimumSilence,
-                   range: SilenceSettings.minimumSilenceRange, step: 0.05,
-                   label: String(format: "%.2f s", model.settings.minimumSilence),
-                   help: "Pauses shorter than this are never cut, so speech keeps its natural rhythm.")
-
-            slider("Gap left at each cut", value: $model.settings.padding,
-                   range: SilenceSettings.paddingRange, step: 0.01,
-                   label: String(format: "%.2f s", model.settings.padding),
-                   help: "Quiet kept before and after each cut. Smaller is tighter clip-to-clip pacing; words are protected either way.")
-
-            slider("Drop stray noises shorter than", value: $model.settings.minimumSound,
-                   range: SilenceSettings.minimumSoundRange, step: 0.05,
-                   label: String(format: "%.2f s", model.settings.minimumSound),
-                   help: "A tap, click or sigh with silence on both sides is removed with the silence instead of being left as a tiny clip.")
-
-            VStack(alignment: .leading, spacing: 4) {
-                Picker("Listen to", selection: $model.settings.scope) {
-                    Text("Primary storyline").tag(DetectionScope.primaryStoryline)
-                    Text("All clips").tag(DetectionScope.allClips)
+            // Which clips are listened to.
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Which clips are listened to")
+                Picker("Which clips are listened to", selection: $model.settings.scope) {
+                    Text("Main storyline only").tag(DetectionScope.primaryStoryline)
+                    Text("Attached clips too").tag(DetectionScope.allClips)
                 }
                 .pickerStyle(.segmented)
-                Text(model.settings.scope == .primaryStoryline
-                     ? "Connected clips (music, B-roll, titles) don't count and stay whole, moving with the clip they're attached to."
-                     : "A moment is silent only if nothing is playing, connected clips included. Connected audio is cut too.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                .labelsHidden()
+                caption(model.settings.scope == .primaryStoryline
+                        ? "Only the clips in the main (primary) storyline decide what is silent. Music, B-roll and titles attached above or below it are ignored and never cut; they move along with the clip they are attached to."
+                        : "A moment only counts as silent if nothing at all is playing, attached clips included, and attached audio gets cut as well. Use this when your voice is on a clip attached to B-roll. With background music attached, nothing will be cut.")
             }
 
             if model.settings != .default {
-                Button("Reset to Defaults") { model.settings = .default }
+                Button("Put everything back to the recommended settings") { model.settings = .default }
                     .buttonStyle(.link)
-                    .font(.caption)
             }
         }
     }
 
+    private func seconds(_ value: Double) -> String {
+        String(format: "%.2f s", value)
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    /// A slider that says, in words, what it changes: a title phrased as the rule it sets, the
+    /// current value, what each end does, and a sentence of explanation.
     private func slider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double,
-                        label: String, help: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
+                        label: String, lower: String, upper: String, explanation: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline) {
                 Text(title)
                 Spacer()
                 Text(label)
                     .monospacedDigit()
-                    .foregroundStyle(.secondary)
+                    .fontWeight(.semibold)
             }
             // Snap in the binding rather than with `step:`, which would draw a tick mark per step.
             Slider(value: Binding(get: { value.wrappedValue },
                                   set: { value.wrappedValue = ($0 / step).rounded() * step }), in: range)
-                .help(help)
                 .accessibilityLabel(title)
                 .accessibilityValue(label)
+                .accessibilityHint(explanation)
+            HStack {
+                Text("← " + lower)
+                Spacer()
+                Text(upper + " →")
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            caption(explanation)
+                .padding(.top, 2)
         }
     }
 

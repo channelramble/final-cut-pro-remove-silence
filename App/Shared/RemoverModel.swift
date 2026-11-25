@@ -32,7 +32,7 @@ final class RemoverModel: ObservableObject {
     private var analysis: TimelineAnalysis?
     private var task: Task<Void, Never>?
     /// Bumped whenever the presets change, so retuned defaults replace previously saved values.
-    private static let settingsKey = "SilenceSettings.v3"
+    private static let settingsKey = "SilenceSettings.v4"
 
     static let waveformBuckets = 900
 

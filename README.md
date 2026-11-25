@@ -28,16 +28,18 @@ made with **File > Export XML**. A copy of every project it makes is kept in `~/
 ## Presets
 
 The presets are tuned on real talking-to-camera footage and are meant to be left alone; the controls are
-tucked under **Adjust**.
+tucked under **Change how it cuts**, each with a plain description of what it does.
+
+<img src="settings-panel.png" width="420" alt="The settings panel: each slider is named as the rule it sets, with what each end does and a sentence of explanation">
 
 | Setting | Preset | What it does |
 | --- | --- | --- |
-| Detect the silence level automatically | On | Measures each recording's background noise and voice level and puts the threshold between them. |
-| Silence level | -35 dB | Used when automatic detection is off. Anything quieter counts as silence. Lower is more cautious. |
-| Shortest silence to cut | 0.85 s | Shorter pauses — the natural ones a speaker makes mid-thought — are never cut. Longer ones (dead air, a lost train of thought, the wait before a retake) are. |
-| Gap left at each cut | 0.03 s | Quiet kept before and after each cut, measured from where the audio crosses the silence level. Two frames at 60 fps: the cut lands while the word is still fading, like a tight manual edit. Raise it for a more relaxed feel. |
-| Drop stray noises shorter than | 0.25 s | A tap, click or sigh with dead air on both sides is removed with the silence instead of being left behind as a clip a few frames long. |
-| Listen to | Primary storyline | **Primary storyline**: only the main clips decide what's silent; connected music, B-roll and titles stay whole and move with the clip they're attached to. **All clips**: a moment is silent only if nothing at all is playing, and connected audio clips are cut too (for voice-over connected to B-roll). |
+| Only cut silences longer than | 0.85 s | Shorter pauses — the natural ones a speaker makes mid-thought — are never cut. Longer ones (dead air, a lost train of thought, the wait before a retake) are. |
+| Silence left on each side of a cut | 0.03 s | Quiet kept after the last word before a cut and before the first word after it. Two frames at 60 fps, for tight clip-to-clip pacing. Raise it for a more relaxed feel. |
+| Throw away leftover clips shorter than | 0.40 s | A bit of sound this short with silence on both sides — a click, a cough, a false start — is removed with the silence instead of being left behind as a tiny clip. |
+| Work out what counts as silence for me | On | Measures each recording's background noise and voice level and puts the threshold between them. |
+| Anything quieter than this is silence | -35 dB | Used when the switch above is off. Lower is more cautious. |
+| Which clips are listened to | Main storyline only | **Main storyline only**: only the primary storyline decides what's silent; connected music, B-roll and titles stay whole and move with the clip they're attached to. **Attached clips too**: a moment is silent only if nothing at all is playing, and connected audio clips are cut too (for voice-over connected to B-roll). |
 
 ### How speech is protected
 
@@ -50,6 +52,10 @@ tucked under **Adjust**.
   silence, so there is no visibly flat stretch of waveform on either side of a cut.
 - **Final consonants.** A click-length sound right after a word (the "t" in "but") is treated as part of the
   word, not as a click.
+- **No tiny clips.** Whatever lies between two cuts has to be worth a clip: at least 0.4 s long, not mostly
+  gaps (a couple of clicks), and — if it is under a second — reaching somewhere near the level of the voice.
+  A silence that runs from the end of one clip into the start of the next is treated as one silence, and a
+  recording too short to judge on its own is held to the level of the rest of the project.
 - **Natural pauses.** Only silences of at least 0.85 s are touched at all.
 
 Silence removal takes out the dead air around a fluffed take, not the fluffed words themselves — those are
